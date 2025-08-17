@@ -16,6 +16,7 @@ const (
 	MaxAgeAfterFirstFollower = 30 * time.Minute
 	maxSellLoopCount         = 1000
 	maxConcurrentBuyTasks    = 100
+	decaySteepness           = 3
 )
 
 func main() {
@@ -33,6 +34,7 @@ func main() {
 
 	bot := intervention.NewBot(
 		bobPad,
+		decaySteepness,
 		commitment,
 		reserveSellThreshold,
 		buyInterval,
@@ -46,26 +48,4 @@ func main() {
 	go bot.Start()
 
 	select {}
-
-	// err = bobPad.DepositBob(90e8)
-	// if err != nil {
-	// 	panic(err)
-	// }
-
-	// latestToken, err := bobPad.GetLatestToken()
-	// if err != nil {
-	// 	panic(err)
-	// }
-
-	// amountOut, err := bobPad.Swap(10979592588320680705, "Buy", 100000000)
-	// if err != nil {
-	// 	panic(err)
-	// }
-
-	// amountOut, err := bobPad.Swap(10979592588320680705, "Sell", 1285685002173)
-	// if err != nil {
-	// 	panic(err)
-	// }
-
-	// log.Println(amountOut)
 }

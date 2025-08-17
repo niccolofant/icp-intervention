@@ -2,6 +2,7 @@ package intervention
 
 import (
 	"log"
+	"math"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ type Bot struct {
 	sellInterval             time.Duration
 	maxAgeAfterBuy           time.Duration
 	maxAgeAfterFirstFollower time.Duration
+	decaySteepness           float64
 	maxSellLoopCount         uint64
 	buySemaphore             chan struct{}
 
@@ -24,6 +26,7 @@ type Bot struct {
 
 func NewBot(
 	bobpad *bobpad.BobPad,
+	decaySteepness float64,
 	commitment uint64,
 	reserveSellThreshold uint64,
 	buyInterval time.Duration,
@@ -35,6 +38,7 @@ func NewBot(
 ) *Bot {
 	return &Bot{
 		bobpad:                   bobpad,
+		decaySteepness:           decaySteepness,
 		amountIn:                 commitment,
 		minAmountOut:             reserveSellThreshold,
 		buyInterval:              buyInterval,
@@ -99,20 +103,12 @@ func (b *Bot) tryToSellToken(token bobpad.Token, amountBought uint64) {
 	tokenID := token.TokenInfo.TokenID
 
 	buyTime := time.Now()
-	buyDeadline := buyTime.Add(b.maxAgeAfterBuy)
 
 	var followerDeadline time.Time
 	hasFollower := false
 
 	for {
 		time.Sleep(b.sellInterval)
-
-		// Check absolute buy age
-		if time.Now().After(buyDeadline) {
-			log.Printf("Max age after buy reached for token %d, selling", tokenID)
-			b.sell(tokenID, amountBought)
-			return
-		}
 
 		// Get balance
 		botBalance, err := b.bobpad.TokenBalance(tokenID)
@@ -123,6 +119,27 @@ func (b *Bot) tryToSellToken(token bobpad.Token, amountBought uint64) {
 		if botBalance == 0 {
 			log.Printf("Bot has balance 0 for token %d", tokenID)
 			b.tokenCache.Delete(tokenID)
+			return
+		}
+
+		minAmountOut := b.minAmountOut
+		if token.IsPremium() {
+			minAmountOut = uint64(float64(minAmountOut) * 1.5)
+		}
+
+		// Check reserve threshold for early sell
+		reserve, err := b.bobpad.TokenReserve(tokenID)
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+
+		dynamicDeadline := buyTime.Add(b.dynamicMaxAge(reserve, minAmountOut))
+
+		// Check absolute buy age
+		if time.Now().After(dynamicDeadline) {
+			log.Printf("Dynamic max age reached for token %d, selling", tokenID)
+			b.sell(tokenID, amountBought)
 			return
 		}
 
@@ -153,45 +170,6 @@ func (b *Bot) tryToSellToken(token bobpad.Token, amountBought uint64) {
 			}
 		}
 
-		// tokenData, err := b.launchpad.GetTokenData(tokenID)
-		// if err != nil {
-		// 	log.Printf("Failed to get token data of token with ID %d: %s", tokenID, err)
-		// 	continue
-		// }
-
-		// if i == 0 && !tokenData.FirstOrderFrom.Equal(b.launchpad.agent.Sender()) {
-		// 	log.Printf("We are not the first for token with ID %d, we are gonna sell", tokenID)
-		// 	icpAmountOut, err := b.launchpad.Sell(tokenID, botBalance)
-		// 	if err != nil {
-		// 		log.Printf("Failed to sell token with ID %d", tokenID)
-		// 		continue
-		// 	} else {
-		// 		operationClosedEvent := NewEventPositionClosed(
-		// 			tokenID,
-		// 			fmt.Sprintf("https://launch.bob.fun/coin/?id=%d", tokenID),
-		// 			icpAmountOut,
-		// 			amountBought,
-		// 			int64(icpAmountOut)-int64(b.commitment),
-		// 			"not-first",
-		// 		)
-
-		// 		b.eventPublisher.PublishEvent(operationClosedEvent)
-		// 		return
-		// 	}
-
-		// }
-
-		// Check reserve threshold for early sell
-		reserve, err := b.bobpad.TokenReserve(tokenID)
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-		minAmountOut := b.minAmountOut
-		if token.IsPremium() {
-			minAmountOut = uint64(float64(minAmountOut) * 1.5)
-		}
-
 		if reserve >= minAmountOut {
 			log.Printf("Sell threshold reached for token %d", tokenID)
 			b.sell(tokenID, botBalance)
@@ -208,4 +186,31 @@ func (b *Bot) sell(tokenID uint64, amount uint64) {
 	}
 	log.Printf("Sold token %d for %d ICP", tokenID, icpAmountOut)
 	b.tokenCache.Delete(tokenID)
+}
+
+// dynamicMaxAge adjusts the max age after buy depending on reserve progress.
+// - If reserve is far from threshold -> maxAgeAfterBuy is long.
+// - If reserve is close to threshold -> maxAgeAfterBuy shrinks.
+func (b *Bot) dynamicMaxAge(reserve, minAmountOut uint64) time.Duration {
+	if minAmountOut == 0 {
+		return b.maxAgeAfterBuy // avoid division by zero
+	}
+
+	progress := float64(reserve) / float64(minAmountOut)
+	if progress > 1 {
+		progress = 1
+	}
+
+	// Parameters
+	minDeadline := 15 * time.Minute
+	maxDeadline := b.maxAgeAfterBuy
+	k := b.decaySteepness
+
+	// Exponential decay: 1 - e^(-k*progress)
+	decay := 1 - math.Exp(-k*progress)
+
+	// Interpolate between maxDeadline and minDeadline
+	adjusted := time.Duration(float64(maxDeadline)*(1-decay) + float64(minDeadline)*decay)
+
+	return adjusted
 }
